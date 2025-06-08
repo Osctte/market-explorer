@@ -1,0 +1,25 @@
+# ---- .github/workflows/manual.yml ----
+name: manual-run
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install requests gspread google-auth openai python-dotenv
+      - name: Run script
+        env:
+          FMP_KEY: ${{ secrets.FMP_KEY }}
+          SERP_KEY: ${{ secrets.SERP_KEY }}
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          CSE_ID: ${{ secrets.CSE_ID }}
+          CSE_KEY: ${{ secrets.CSE_KEY }}
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+          GOOGLE_SERVICE_JSON: ${{ secrets.GOOGLE_SERVICE_JSON }}
+        run: python main.py
