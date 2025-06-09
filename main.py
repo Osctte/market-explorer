@@ -76,17 +76,44 @@ def write_df(ws_name, df):
     ws.clear()
     ws.update([df.columns.values.tolist()] + df.values.tolist(), value_input_option="RAW")
 
-# --- 3. Overwrite Candidates for current industry ---
-new_list = gics_screen(industry) + serpapi_screen(industry)
-if new_list:
-    curr = pd.DataFrame([
-        dict(r, Industry=industry, **{"Keep?": "Y"}) for r in new_list
-    ])
-    curr = curr[curr["Ticker"].map(is_valid_ticker)]
-else:
-    curr = pd.DataFrame(columns=["Industry","Company","Ticker","Source","Keep?"])
+# ---------- 3.  update Candidates tab ---------------------------------
+cand_ws = sh.worksheet("Candidates")
+try:
+    cand_df = pd.DataFrame(cand_ws.get_all_records())
+except gspread.exceptions.APIError:
+    cand_df = pd.DataFrame()
 
-write_df("Candidates", curr)
+if cand_df.empty:
+    cand_df = pd.DataFrame(columns=["Industry","Company","Ticker","Source","Keep?"])
+
+# keep only current industry rows
+other_rows = cand_df[cand_df["Industry"] != industry]
+curr      = cand_df[cand_df["Industry"] == industry]
+
+# Try to get candidates from both sources
+fmp_list = gics_screen(industry)
+serp_list = serpapi_screen(industry)
+
+if not fmp_list and not serp_list:
+    print("🟡 No valid companies found for this industry. Exiting.")
+    exit(0)
+
+# Prefer FMP, but merge both if available
+if fmp_list and serp_list:
+    print(f"ℹ️  Candidates found from both FMP ({len(fmp_list)}) and SerpAPI ({len(serp_list)}).")
+elif fmp_list:
+    print(f"ℹ️  Candidates found from FMP only ({len(fmp_list)}).")
+elif serp_list:
+    print(f"ℹ️  Candidates found from SerpAPI only ({len(serp_list)}).")
+
+new_list = fmp_list + serp_list
+
+if new_list:
+    curr = merge_candidates(curr, [dict(r, Industry=industry, **{"Keep?": ""}) for r in new_list])
+
+cand_df = pd.concat([other_rows, curr], ignore_index=True)
+write_df("Candidates", cand_df)
+
 print(f"ℹ️  Candidates list updated – {len(curr)} rows for {industry}")
 
 # --- 4. Pull metrics only for kept companies (all are kept) ---
