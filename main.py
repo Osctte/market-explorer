@@ -78,11 +78,12 @@ def serpapi_screen(industry_kw: str, limit=20):
             out.append({"Company": title.split("(")[0].strip(), "Ticker": m.group(1), "Source": "Web"})
     return out
 
-def merge_candidates(existing_df: pd.DataFrame, new_rows):
-    """Append new company rows if ticker not already present for this industry"""
-    existing_tickers = set(existing_df["Ticker"].str.upper())
+def merge_candidates(existing_df, new_rows):
+    if existing_df.empty or "Ticker" not in existing_df.columns:
+        return pd.DataFrame(new_rows)
+    existing_tickers = set(existing_df["Ticker"].astype(str).str.upper())
     fresh = [r for r in new_rows if r["Ticker"].upper() not in existing_tickers]
-    return existing_df._append(fresh, ignore_index=True) if fresh else existing_df
+    return pd.concat([existing_df, pd.DataFrame(fresh)], ignore_index=True)
 
 def write_df(ws_name, df):
     ws = sh.worksheet(ws_name)
