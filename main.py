@@ -1,25 +1,22 @@
 # ==== main.py  =========================================================
 """
-Market-Explorer v1  (fits the Google-Sheet schema we created)
-  1. Reads the industry keyword from the Industry_Control tab.
-  2. Builds / updates the Candidates tab (GICS + Google search).
-  3. Pulls metrics for companies where Keep? == 'Y', dedupes rows.
-  4. Scrapes a market-size figure via Custom Search.
-  5. Writes 3-bullet insights (per company + sector aggregate).
-  6. Logs duration & status in RunLog.
+Market-Explorer v1 (AUTOMATED VERSION)
+- Reads industry keyword from Industry_Control!A2.
+- Overwrites Candidates tab for this industry, marks all Keep? as 'Y'.
+- Pulls metrics for all valid companies.
+- Scrapes market size.
+- Writes insights.
+- Logs run.
 
-Required env vars come from GitHub Secrets:
-  FMP_KEY, SERP_KEY, OPENAI_KEY,
-  CSE_ID, CSE_KEY,
-  GSHEET_ID,
-  GOOGLE_SERVICE_JSON  (the service-account JSON, single line)
+Only cell you edit is Industry_Control!A2.
 """
 
 import json, os, re, time, textwrap, datetime
 import requests, openai, pandas as pd, gspread
 from google.oauth2.service_account import Credentials
+from datetime import timezone
 
-# ---------- 0.  auth helpers ------------------------------------------
+# --- 0. Auth ---
 SERVICE_INFO = json.loads(os.environ["GOOGLE_SERVICE_JSON"])
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 gc = gspread.authorize(Credentials.from_service_account_info(SERVICE_INFO, scopes=SCOPES))
@@ -32,17 +29,15 @@ SERP_KEY = os.environ["SERP_KEY"]
 CSE_ID   = os.environ["CSE_ID"]
 CSE_KEY  = os.environ["CSE_KEY"]
 
-# ---------- 1.  read control cell -------------------------------------
+# --- 1. Read control cell ---
 industry = sh.worksheet("Industry_Control").acell("A2").value or ""
 industry = industry.strip()
 if not industry:
     raise SystemExit("⚠️  Industry_Control!A2 is empty")
-
 print(f"▶️  Industry selected: {industry}")
 
-# ---------- 2.  helpers ------------------------------------------------
+# --- 2. Candidate screens ---
 def gics_screen(industry_kw: str, limit=30):
-    """Return list of dicts from FMP sector screen; empty list on error."""
     url = (
         "https://financialmodelingprep.com/api/v4/stock-screening"
         f"?sector={requests.utils.quote(industry_kw)}&limit={limit}&apikey={FMP_KEY}"
@@ -52,11 +47,9 @@ def gics_screen(industry_kw: str, limit=30):
     except Exception as e:
         print(f"⚠️  FMP request error: {e}")
         return []
-
     if not isinstance(data, list):
         print(f"ℹ️  FMP: no sector match for '{industry_kw}'.")
         return []
-
     return [
         {"Company": d["companyName"], "Ticker": d["symbol"], "Source": "GICS"}
         for d in data
@@ -75,56 +68,39 @@ def serpapi_screen(industry_kw: str, limit=20):
             out.append({"Company": title.split("(")[0].strip(), "Ticker": m.group(1), "Source": "Web"})
     return out
 
-def merge_candidates(existing_df, new_rows):
-    if existing_df.empty or "Ticker" not in existing_df.columns:
-        return pd.DataFrame(new_rows)
-    existing_tickers = set(existing_df["Ticker"].astype(str).str.upper())
-    fresh = [r for r in new_rows if r["Ticker"].upper() not in existing_tickers]
-    return pd.concat([existing_df, pd.DataFrame(fresh)], ignore_index=True)
+def is_valid_ticker(t):
+    return bool(t) and t.isalnum() and not t.isdigit() and 1 <= len(t) <= 5
 
 def write_df(ws_name, df):
     ws = sh.worksheet(ws_name)
     ws.clear()
     ws.update([df.columns.values.tolist()] + df.values.tolist(), value_input_option="RAW")
 
-# ---------- 3.  update Candidates tab ---------------------------------
-cand_ws = sh.worksheet("Candidates")
-try:
-    cand_df = pd.DataFrame(cand_ws.get_all_records())
-except gspread.exceptions.APIError:
-    cand_df = pd.DataFrame()
-
-if cand_df.empty:
-    cand_df = pd.DataFrame(columns=["Industry","Company","Ticker","Source","Keep?"])
-
-other_rows = cand_df[cand_df["Industry"] != industry]
-curr      = cand_df[cand_df["Industry"] == industry]
-
-# --------- THIS LINE auto-marks new candidates as Keep? = Y ------------
-new_list  = gics_screen(industry) + serpapi_screen(industry)
+# --- 3. Overwrite Candidates for current industry ---
+new_list = gics_screen(industry) + serpapi_screen(industry)
 if new_list:
-    curr    = merge_candidates(
-        curr,
-        [dict(r, Industry=industry, **{"Keep?": "Y"}) for r in new_list]  # <--- AUTO KEEP
-        # [dict(r, Industry=industry, **{"Keep?": ""}) for r in new_list]  # <--- MANUAL REVIEW
-    )
+    curr = pd.DataFrame([
+        dict(r, Industry=industry, **{"Keep?": "Y"}) for r in new_list
+    ])
+    curr = curr[curr["Ticker"].map(is_valid_ticker)]
+else:
+    curr = pd.DataFrame(columns=["Industry","Company","Ticker","Source","Keep?"])
 
-cand_df   = pd.concat([other_rows, curr], ignore_index=True)
-write_df("Candidates", cand_df)
-
+write_df("Candidates", curr)
 print(f"ℹ️  Candidates list updated – {len(curr)} rows for {industry}")
 
-# ---------- 4.  pull metrics only for approved companies --------------
-approved = curr[curr["Keep?"].astype(str).str.upper() == "Y"]
-if approved.empty:
-    print("🟡 No companies marked Keep? = Y yet. Exiting after candidate pass.")
+# --- 4. Pull metrics only for kept companies (all are kept) ---
+if curr.empty:
+    print("🟡 No valid companies found for this industry. Exiting.")
     exit(0)
 
 metrics_ws = sh.worksheet("Metrics")
-metrics_df = pd.DataFrame(metrics_ws.get_all_records())
+try:
+    metrics_df = pd.DataFrame(metrics_ws.get_all_records())
+except gspread.exceptions.APIError:
+    metrics_df = pd.DataFrame()
 if metrics_df.empty:
-    metrics_df = pd.DataFrame(columns=["Industry","Company","Ticker","FY","Metric",
-                                       "Value","Source","IsEstimate"])
+    metrics_df = pd.DataFrame(columns=["Industry","Company","Ticker","FY","Metric","Value","Source","IsEstimate"])
 
 def fmp_financials(ticker: str, years=10):
     url_i = f"https://financialmodelingprep.com/api/v3/income-statement/{ticker}?limit={years}&apikey={FMP_KEY}"
@@ -156,7 +132,7 @@ def fmp_financials(ticker: str, years=10):
         rows.append( (int(datetime.datetime.now().year),"Dividend per Share", prof[0].get("lastDiv",0)) )
     return rows
 
-def dedupe_insert(df: pd.DataFrame, new_rows):
+def dedupe_insert(df: pd.DataFrame, new_rows, company, ticker, industry):
     added, clashes = 0, 0
     for (fy,metric,val) in new_rows:
         key = (industry, company, ticker, fy, metric)
@@ -173,12 +149,12 @@ def dedupe_insert(df: pd.DataFrame, new_rows):
 
 added_total, clash_total = 0, 0
 start = time.time()
-for _, row in approved.iterrows():
+for _, row in curr.iterrows():
     company, ticker = row["Company"], row["Ticker"]
     print(f"📊 Pulling {ticker}")
     try:
         new_rows = fmp_financials(ticker)
-        metrics_df, a, c = dedupe_insert(metrics_df, new_rows)
+        metrics_df, a, c = dedupe_insert(metrics_df, new_rows, company, ticker, industry)
         added_total  += a
         clash_total  += c
     except Exception as e:
@@ -187,7 +163,7 @@ for _, row in approved.iterrows():
 write_df("Metrics", metrics_df)
 print(f"✅ Metrics updated: +{added_total} new rows  |  {clash_total} clashes sent to Pending_Review")
 
-# ---------- 5.  scrape market-size ------------------------------------
+# --- 5. Market size ---
 def scrape_market_size(industry_kw: str):
     q  = f"{industry_kw} market size revenue"
     url = ("https://customsearch.googleapis.com/customsearch/v1"
@@ -209,7 +185,7 @@ if mkt_fig:
     ms_ws.append_row([industry, mkt_fig, mkt_unit, datetime.datetime.now().year, cite, "Y"])
     print(f"🌍 Market size appended: {mkt_fig} {mkt_unit}")
 
-# ---------- 6.  generate insights -------------------------------------
+# --- 6. Insights ---
 def bullets_for(dfsub, target, level="Company"):
     prompt = textwrap.dedent(f"""
         Provide three concise, bullet-point insights on the following financial data.
@@ -226,19 +202,19 @@ def bullets_for(dfsub, target, level="Company"):
     return resp.choices[0].message.content.strip()
 
 ins_ws = sh.worksheet("Insights")
-for _, row in approved.iterrows():
+for _, row in curr.iterrows():
     ticker = row["Ticker"]
     com_df = metrics_df[(metrics_df["Ticker"]==ticker)&(metrics_df["Industry"]==industry)]
     ins_ws.append_row([industry,"Company",ticker,bullets_for(com_df, ticker, "Company"),
-                       datetime.datetime.utcnow().isoformat()])
+                       datetime.datetime.now(timezone.utc).isoformat()])
 
 sector_df = metrics_df[metrics_df["Industry"]==industry]
 ins_ws.append_row([industry,"Sector",industry,bullets_for(sector_df, industry, "Sector"),
-                   datetime.datetime.utcnow().isoformat()])
+                   datetime.datetime.now(timezone.utc).isoformat()])
 
-# ---------- 7.  run-log ------------------------------------------------
+# --- 7. Run log ---
 dur = round(time.time() - start, 1)
-sh.worksheet("RunLog").append_row([datetime.datetime.utcnow().isoformat(),
-                                   industry, len(approved), dur, "ok"])
+sh.worksheet("RunLog").append_row([datetime.datetime.now(timezone.utc).isoformat(),
+                                   industry, len(curr), dur, "ok"])
 print(f"🏁 Done in {dur}s")
 # ======================================================================
