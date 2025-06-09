@@ -42,13 +42,27 @@ print(f"▶️  Industry selected: {industry}")
 
 # ---------- 2.  helpers ------------------------------------------------
 def gics_screen(industry_kw: str, limit=30):
-    """Return list of {name,ticker,source} from FMP sector screen"""
+    """Return list of dicts from FMP sector screen; empty list on error."""
     url = (
         "https://financialmodelingprep.com/api/v4/stock-screening"
         f"?sector={requests.utils.quote(industry_kw)}&limit={limit}&apikey={FMP_KEY}"
     )
-    data = requests.get(url, timeout=20).json()
-    return [{"Company": d["companyName"], "Ticker": d["symbol"], "Source": "GICS"} for d in data]
+    try:
+        data = requests.get(url, timeout=20).json()
+    except Exception as e:
+        print(f"⚠️  FMP request error: {e}")
+        return []
+
+    # If FMP returns a dict (error msg) instead of list, bail out gracefully
+    if not isinstance(data, list):
+        print(f"ℹ️  FMP: no sector match for '{industry_kw}'.")
+        return []
+
+    return [
+        {"Company": d["companyName"], "Ticker": d["symbol"], "Source": "GICS"}
+        for d in data
+        if isinstance(d, dict) and "companyName" in d
+    ]
 
 def serpapi_screen(industry_kw: str, limit=20):
     """Scrape Google 'top ... public companies' via SerpAPI"""
