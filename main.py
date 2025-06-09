@@ -53,7 +53,6 @@ def gics_screen(industry_kw: str, limit=30):
         print(f"⚠️  FMP request error: {e}")
         return []
 
-    # If FMP returns a dict (error msg) instead of list, bail out gracefully
     if not isinstance(data, list):
         print(f"ℹ️  FMP: no sector match for '{industry_kw}'.")
         return []
@@ -65,14 +64,12 @@ def gics_screen(industry_kw: str, limit=30):
     ]
 
 def serpapi_screen(industry_kw: str, limit=20):
-    """Scrape Google 'top ... public companies' via SerpAPI"""
     qs = f"top {industry_kw} public companies"
     url = f"https://serpapi.com/search.json?engine=google&q={requests.utils.quote(qs)}&api_key={SERP_KEY}"
     hits = requests.get(url, timeout=20).json().get("organic_results", [])[:limit]
     out = []
     for h in hits:
         title = h.get("title", "")
-        # crude ticker match within parentheses
         m = re.search(r"\((\w{1,5})\)", title)
         if m:
             out.append({"Company": title.split("(")[0].strip(), "Ticker": m.group(1), "Source": "Web"})
@@ -100,14 +97,17 @@ except gspread.exceptions.APIError:
 if cand_df.empty:
     cand_df = pd.DataFrame(columns=["Industry","Company","Ticker","Source","Keep?"])
 
-# keep only current industry rows
 other_rows = cand_df[cand_df["Industry"] != industry]
 curr      = cand_df[cand_df["Industry"] == industry]
 
+# --------- THIS LINE auto-marks new candidates as Keep? = Y ------------
 new_list  = gics_screen(industry) + serpapi_screen(industry)
-
 if new_list:
-    curr    = merge_candidates(curr, [dict(r, Industry=industry, **{"Keep?": ""}) for r in new_list])
+    curr    = merge_candidates(
+        curr,
+        [dict(r, Industry=industry, **{"Keep?": "Y"}) for r in new_list]  # <--- AUTO KEEP
+        # [dict(r, Industry=industry, **{"Keep?": ""}) for r in new_list]  # <--- MANUAL REVIEW
+    )
 
 cand_df   = pd.concat([other_rows, curr], ignore_index=True)
 write_df("Candidates", cand_df)
@@ -115,7 +115,7 @@ write_df("Candidates", cand_df)
 print(f"ℹ️  Candidates list updated – {len(curr)} rows for {industry}")
 
 # ---------- 4.  pull metrics only for approved companies --------------
-approved = curr[curr["Keep?"].str.upper() == "Y"]
+approved = curr[curr["Keep?"].astype(str).str.upper() == "Y"]
 if approved.empty:
     print("🟡 No companies marked Keep? = Y yet. Exiting after candidate pass.")
     exit(0)
@@ -148,7 +148,6 @@ def fmp_financials(ticker: str, years=10):
             (fy,"CapEx",               rec["capitalExpenditure"]),
             (fy,"Free Cash Flow",      rec["freeCashFlow"])
         ]
-    # one-shot endpoints
     prof = requests.get(f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_KEY}", timeout=20).json()
     if prof:
         rows.append( (int(datetime.datetime.now().year),"Employees", prof[0].get("fullTimeEmployees",0)) )
