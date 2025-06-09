@@ -123,10 +123,10 @@ write_df("Candidates", cand_df)
 
 print(f"ℹ️  Candidates list updated – {len(curr)} rows for {industry}")
 
-# ---------- 4.  pull metrics only for approved companies --------------
-approved = curr[curr["Keep?"].str.upper() == "Y"]
+# ---------- 4.  pull metrics for *all* candidates ---------------------
+approved = curr.copy()        # no manual flag needed
 if approved.empty:
-    print("🟡 No companies marked Keep? = Y yet. Exiting after candidate pass.")
+    print("🟡 No valid companies found. Exiting.")
     exit(0)
 
 metrics_ws = sh.worksheet("Metrics")
